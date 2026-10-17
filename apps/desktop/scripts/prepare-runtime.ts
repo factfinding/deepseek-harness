@@ -2,7 +2,8 @@
 
 import { packagingStep } from './packaging-step.mjs'
 import { execFileSync } from 'node:child_process'
-import { chmodSync, cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { parseArgs } from 'node:util'
@@ -28,6 +29,21 @@ function preparePnpm(): string {
   return manifest.version
 }
 
+/**
+ * Windows 7 build: unpack the bundled PowerShell 7.2 into runtime/pwsh when
+ * DSH_WIN7_PWSH_ARCHIVE names its zip; DSH_WIN7_PWSH_SHA256 must match the archive.
+ */
+async function prepareWin7Pwsh(): Promise<void> {
+  const archive = process.env.DSH_WIN7_PWSH_ARCHIVE
+  if (archive === undefined || archive === '') return
+  const expected = process.env.DSH_WIN7_PWSH_SHA256?.toLowerCase()
+  const actual = createHash('sha256').update(readFileSync(archive)).digest('hex')
+  if (expected !== actual) throw new Error(`desktop runtime: DSH_WIN7_PWSH_ARCHIVE has SHA-256 ${actual}, expected DSH_WIN7_PWSH_SHA256 ${String(expected)}`)
+  const destination = join(RUNTIME_ROOT, 'pwsh')
+  await extractZip(archive, { dir: destination })
+  if (!existsSync(join(destination, 'pwsh.exe'))) throw new Error('desktop runtime: DSH_WIN7_PWSH_ARCHIVE has no top-level pwsh.exe')
+}
+
 async function main(): Promise<void> {
   const { values } = parseArgs({ options: { 'defer-primary-runtime-smoke': { type: 'boolean', default: false } } })
   const target = resolveDesktopBuildTarget()
@@ -35,8 +51,12 @@ async function main(): Promise<void> {
   const arch = target.endsWith('arm64') ? 'arm64' : 'x64'
   const require = createRequire(import.meta.url)
   const { version } = require('electron/package.json') as { version: string }
-  const archive = await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'download:electron',
-    () => downloadArtifact({ version, platform, arch, artifactName: 'electron', cacheRoot: BUILD_PATHS.downloads }))
+  // Windows 7 build: DSH_WIN7_ELECTRON_ARCHIVE names the locally built, Win7-patched Electron zip.
+  const localElectron = process.env.DSH_WIN7_ELECTRON_ARCHIVE
+  const archive = localElectron !== undefined && localElectron !== ''
+    ? localElectron
+    : await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'download:electron',
+      () => downloadArtifact({ version, platform, arch, artifactName: 'electron', cacheRoot: BUILD_PATHS.downloads }))
   rmSync(BUILD_PATHS.electron, { recursive: true, force: true })
   await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'extract:electron', () => extractZip(archive, { dir: BUILD_PATHS.electron }))
   const executable = join(BUILD_PATHS.electron, platform === 'win32' ? 'electron.exe' : 'Electron.app/Contents/MacOS/Electron')
@@ -48,6 +68,7 @@ async function main(): Promise<void> {
   rmSync(RUNTIME_ROOT, { recursive: true, force: true })
   mkdirSync(RUNTIME_ROOT, { recursive: true })
   const pnpmVersion = preparePnpm()
+  await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'prepare:win7-pwsh', prepareWin7Pwsh)
   cpSync(join(import.meta.dirname, 'node-bin'), join(RUNTIME_ROOT, 'bin'), { recursive: true })
   chmodSync(join(RUNTIME_ROOT, 'bin', 'node'), 0o755)
   writeFileSync(join(RUNTIME_ROOT, 'versions.json'), `${JSON.stringify({
