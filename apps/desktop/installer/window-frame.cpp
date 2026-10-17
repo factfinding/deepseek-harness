@@ -419,6 +419,16 @@ extern "C" __declspec(dllexport) HRESULT __cdecl InstallerApplyFrame(HWND window
             ShowWindow(child, SW_HIDE);
         }
     }
+    // [win7] Windows 7 can run with desktop composition off (Basic and Classic themes), where every DWM frame call
+    // fails. The frame shadow is decoration, so the borderless window is used as is, without the caption style only
+    // DWM keeps hidden; Windows 8+ always composes.
+    BOOL composed = FALSE;
+    if (FAILED(DwmIsCompositionEnabled(&composed)) || !composed) {
+        SetWindowLongW(window, GWL_STYLE, GetWindowLongW(window, GWL_STYLE) | WS_THICKFRAME);
+        SetWindowPos(window, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        return S_OK;
+    }
     // DWM retains native transitions; WM_NCCALCSIZE removes the visible caption.
     SetWindowLongW(window, GWL_STYLE, GetWindowLongW(window, GWL_STYLE) | WS_THICKFRAME | WS_CAPTION);
     const DWMNCRENDERINGPOLICY policy = DWMNCRP_ENABLED;
