@@ -32,6 +32,7 @@ import {
 import { desktopTargetPlatform, resolveDesktopBuildTarget, resolveDesktopTargetBuildPaths } from './desktop-build-paths.mjs'
 import { desktopRuntimeFileExclusion } from './runtime-file-policy.ts'
 import { selectOfficeEngine } from '../../../scripts/libreoffice-packages.mjs'
+import { applyRuntimeOverlay, pinRuntimeOverlayVersions } from './runtime-overlay.ts'
 
 const APP_ROOT = resolve(import.meta.dirname, '..')
 const BUILD_PATHS = resolveDesktopTargetBuildPaths()
@@ -122,6 +123,14 @@ async function main(): Promise<void> {
       cpSync(join(PACKAGE_SET_ROOT, DESKTOP_PACKAGES_DIR), join(BUILD_ROOT, DESKTOP_PACKAGES_DIR), { recursive: true })
       createRuntimeProjectMetadata(BUILD_ROOT, release)
     })
+    // Windows 7 build: install exactly the dependency versions the runtime overlay was built for.
+    const win7Overlay = process.env.DSH_WIN7_RUNTIME_OVERLAY
+    if (win7Overlay !== undefined && win7Overlay !== '') {
+      await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'runtime:win7-pins', async () => {
+        const pins = pinRuntimeOverlayVersions(resolve(win7Overlay), join(BUILD_ROOT, 'pnpm-workspace.yaml'))
+        for (const [name, version] of Object.entries(pins)) console.log(`win7 pin: ${name}@${version}`)
+      })
+    }
     await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'runtime:lockfile', () => runPnpm(['install', '--lockfile-only']))
     verifyDesktopCoreLockfile(
       readFileSync(join(BUILD_ROOT, 'pnpm-lock.yaml'), 'utf8'),
@@ -141,6 +150,12 @@ async function main(): Promise<void> {
         filter: source => desktopRuntimeFileExclusion(relative(modules, source), target, officeEngine) === undefined,
       })
     })
+    // Windows 7 build: replace and add runtime files before the descriptor records their digests.
+    if (win7Overlay !== undefined && win7Overlay !== '') {
+      await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'runtime:win7-overlay', async () => {
+        for (const path of applyRuntimeOverlay(resolve(win7Overlay), DSH_OUTPUT_ROOT)) console.log(`win7 overlay: ${path}`)
+      })
+    }
     writeFileSync(join(DSH_OUTPUT_ROOT, 'package.json'), `${JSON.stringify({
       name: '@deepseek-ai/dsh-desktop-runtime', private: true, version: release.version, type: 'module',
       dependencies: Object.fromEntries(packageSet.packages.map(entry => [entry.name, entry.version])),
