@@ -81,6 +81,20 @@ export async function downloadRuntimeNpmPackage(artifact: RuntimeNpmArchive, des
 }
 
 /**
+ * Locate the locked Node archive. `DSH_PRIMARY_RUNTIME_NODE_ARCHIVE` names a local build, such as the
+ * Windows 7 Node, used instead of nodejs.org; it must still match the locked digest.
+ * @param filename - Official archive filename, whose top-level directory the local build must reproduce.
+ * @param sha256 - Locked SHA-256 digest.
+ * @param cache - Download cache directory.
+ * @returns Verified local archive path.
+ */
+async function nodeArchive(filename: string, sha256: string, cache: string): Promise<string> {
+  const local = process.env.DSH_PRIMARY_RUNTIME_NODE_ARCHIVE
+  if (local === undefined || local === '') return downloadPrimaryRuntimeAsset(`https://nodejs.org/dist/v${lock.nodeVersion}/${filename}`, sha256, cache)
+  if (createHash('sha256').update(readFileSync(local)).digest('hex') !== sha256) throw new Error(`primary runtime: checksum mismatch for DSH_PRIMARY_RUNTIME_NODE_ARCHIVE=${local}`)
+  return resolve(local)
+}
+/**
  * Prepare the locked standalone Node independently of Python and pnpm.
  * @param target - Target interpreter platform.
  * @param destination - Directory receiving bin/node and LICENSE.
@@ -90,7 +104,7 @@ export async function downloadRuntimeNpmPackage(artifact: RuntimeNpmArchive, des
 export async function downloadNodeRuntime(target: PrimaryRuntimeTarget, destination: string, cache: string): Promise<void> {
   const artifact = lock.targets[target]
   const filename = `node-v${lock.nodeVersion}-${artifact.nodeArchive}`
-  const archive = await downloadPrimaryRuntimeAsset(`https://nodejs.org/dist/v${lock.nodeVersion}/${filename}`, artifact.nodeSha256, cache)
+  const archive = await nodeArchive(filename, artifact.nodeSha256, cache)
   const staging = mkdtempSync(join(tmpdir(), 'dsh-node-'))
   try {
     if (target === 'win-x64') await extractZip(archive, { dir: staging })
@@ -109,6 +123,26 @@ async function pythonArchive(target: keyof typeof lock.targets, cache: string): 
   const artifact = lock.targets[target]
   const filename = `cpython-${lock.pythonVersion}+${lock.pythonRelease}-${artifact.pythonTarget}-install_only_stripped.tar.gz`
   return downloadPrimaryRuntimeAsset(`https://github.com/astral-sh/python-build-standalone/releases/download/${lock.pythonRelease}/${encodeURIComponent(filename)}`, artifact.pythonSha256, cache)
+}
+
+/**
+ * Unpack the target's Python into `dependencies/python`. win-x64 uses the PythonVista NuGet build of the
+ * locked CPython release, which also runs on Windows 7 SP1 with KB2533623; other targets use python-build-standalone.
+ * @param target - Runtime target.
+ * @param dependencies - Payload dependencies directory.
+ * @param staging - Scratch directory on the same volume as `dependencies`.
+ * @param cache - Verified archive cache.
+ * @returns Resolves after `dependencies/python` holds the interpreter.
+ */
+async function unpackPython(target: PrimaryRuntimeTarget, dependencies: string, staging: string, cache: string): Promise<void> {
+  if (target !== 'win-x64') {
+    await extractTar({ file: await pythonArchive(target, cache), cwd: dependencies })
+    return
+  }
+  const { url, sha256 } = lock.targets['win-x64'].pythonNupkg
+  const unpacked = join(staging, 'python-nupkg')
+  await extractZip(await downloadPrimaryRuntimeAsset(url, sha256, cache), { dir: unpacked })
+  renameSync(join(unpacked, 'tools'), join(dependencies, 'python'))
 }
 
 /**
@@ -210,7 +244,7 @@ export async function preparePrimaryRuntime(options: PreparePrimaryRuntimeOption
         await cp(dirname(pnpmManifest), join(dependencies, 'pnpm'), { recursive: true, dereference: true })
       }
     }
-    await extractTar({ file: await pythonArchive(target, paths.downloads), cwd: dependencies })
+    await unpackPython(target, dependencies, staging, paths.downloads)
     const manifest: PrimaryRuntimeManifest = {
       desktopVersion: options.version,
       platform: target === 'win-x64' ? 'win32' : target.startsWith('linux-') ? 'linux' : 'darwin',
