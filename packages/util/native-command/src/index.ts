@@ -7,6 +7,7 @@ export { runNativeCommand } from './runner.ts'
 export { isWsl } from './host-environment.ts'
 export type { HostEnvironmentFacts } from './host-environment.ts'
 export type { NativeCommandRunner } from './runner.ts'
+export { windowsPowerShell } from './windows-powershell.ts'
 export {
   canOpenNativePath,
   nativeFileManager,
