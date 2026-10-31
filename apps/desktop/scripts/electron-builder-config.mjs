@@ -96,6 +96,7 @@ export function createElectronBuilderConfig(
     installWindowsNsisBootstrapSigner({ sign: windowsSigner })
   }
   const update = unsigned ? undefined : resolveDesktopAutoUpdateConfig(env, resolvedPlatform, resolvedArch)
+  const win7Feed = unsigned && resolvedPlatform === 'win32' ? win7UpdateFeed(env) : undefined
   if (preparedRuntime !== undefined) buildPaths.dsh = preparedRuntime
   // electron-builder merges extraMetadata into the packaged manifest, so a build version here reaches
   // the artifact names, the update feed, and the installed app.getVersion() the updater compares against.
@@ -261,6 +262,26 @@ export function createElectronBuilderConfig(
       differentialPackage: true,
     },
     detectUpdateChannel: false,
-    publish: update === undefined ? null : [{ provider: 'generic', url: update.publicUrl, channel: update.channel }],
+    publish: win7Feed !== undefined ? [win7Feed]
+      : update === undefined ? null : [{ provider: 'generic', url: update.publicUrl, channel: update.channel }],
   }
+}
+
+/**
+ * Windows 7 build: the update feed `DSH_WIN7_UPDATE_URL` names for an unsigned Windows build, such as the
+ * dsh-win7 GitHub Releases' `releases/latest/download/` directory. With a feed, electron-builder writes
+ * `app-update.yml`, which enables the existing Desktop updater unchanged, and emits the `nightly.yml` channel
+ * file. GitHub serves single byte ranges but answers multi-range requests with 501, so differential
+ * downloads request one range at a time.
+ * @param {NodeJS.ProcessEnv} env - Packaging environment.
+ * @returns {{ provider: 'generic', url: string, channel: 'nightly', useMultipleRangeRequest: false } | undefined}
+ *   The feed, or undefined when the variable is unset.
+ */
+function win7UpdateFeed(env) {
+  const url = env.DSH_WIN7_UPDATE_URL?.trim()
+  if (url === undefined || url === '') return undefined
+  if (!/^https?:\/\/[^/]+\/(?:.*\/)?$/u.test(url)) {
+    throw new Error('desktop package: DSH_WIN7_UPDATE_URL must be an http(s) URL ending in /')
+  }
+  return { provider: 'generic', url, channel: 'nightly', useMultipleRangeRequest: false }
 }
