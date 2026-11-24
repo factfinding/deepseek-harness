@@ -46,6 +46,49 @@ def check_interpreters():
         subprocess.run([str(python), "-I", "-B", "-m", "pip", "check"], check=True, timeout=30)
 
 
+def check_pdf(root):
+    """Read a ruled table back with each bundled PDF library, from a plain and an AES-256 encrypted copy.
+
+    Decryption loads cryptography's Rust extension in pypdf and pdfminer.six, and PyMuPDF's table finder runs
+    the layout model on ONNX Runtime: the two native wheels the Windows 7 build rebuilds with shim DLLs.
+    """
+    import onnxruntime
+    import pdfplumber
+    import pymupdf
+    import pypdfium2
+    from pdfminer.high_level import extract_text
+    from pypdf import PdfReader
+
+    assert "CPUExecutionProvider" in onnxruntime.get_available_providers()
+    rows = [["Item", "Value"], ["Revenue", "42"], ["Cost", "17"]]
+    document = pymupdf.open()
+    page = document.new_page()
+    left, top, width, height = 72, 72, 160, 24
+    for row, cells in enumerate(rows):
+        for column, text in enumerate(cells):
+            cell = pymupdf.Rect(left + column * width, top + row * height, left + (column + 1) * width, top + (row + 1) * height)
+            page.draw_rect(cell, color=(0, 0, 0), width=1)
+            page.insert_text((cell.x0 + 6, cell.y1 - 8), text, fontsize=11)
+    plain, encrypted = root / "table.pdf", root / "table-aes.pdf"
+    document.save(plain)
+    document.save(encrypted, encryption=pymupdf.PDF_ENCRYPT_AES_256, user_pw="reader", owner_pw="owner")
+    document.close()
+
+    with pymupdf.open(plain) as reopened:
+        tables = reopened[0].find_tables().tables
+        assert any(["42", "17"] <= [cell for row in table.extract() for cell in row] for table in tables), [table.extract() for table in tables]
+        assert "Revenue" in reopened.to_markdown()
+    with pdfplumber.open(plain) as opened:
+        assert opened.pages[0].extract_table() == rows
+        assert opened.pages[0].to_image(resolution=36).original.size[0] > 0
+    assert len(pypdfium2.PdfDocument(plain)) == 1
+
+    reader = PdfReader(encrypted)
+    assert reader.is_encrypted and reader.decrypt("reader")
+    assert "Revenue" in reader.pages[0].extract_text()
+    assert "Revenue" in extract_text(encrypted, password="reader")
+
+
 def main():
     """Check installed versions and read back editable Office documents."""
     assert sys.version_info[:3] == tuple(map(int, sys.argv[2].split("."))), sys.version
@@ -120,6 +163,9 @@ def main():
         finally:
             reopened_workbook.close()
         assert pandas.read_excel(root / "workbook.xlsx")["Value"].iloc[0] == 42
+        # Only the win-x64 payload carries the PDF libraries.
+        if "pymupdf" in versions:
+            check_pdf(root)
     print("Office runtime versions and document round trips passed.")
 
 

@@ -147,6 +147,42 @@ async function unpackPython(target: PrimaryRuntimeTarget, dependencies: string, 
 }
 
 /**
+ * Python distributions a target installs: the shared map plus the target's own additions. win-x64 adds the PDF
+ * libraries (pypdf, pdfplumber, pdfminer.six, PyMuPDF and their dependencies) for the Windows 7 build; their
+ * newest releases do not cover every target.
+ * @param target - Runtime target.
+ * @param runtimeLock - Locked interpreter and wheel inputs.
+ * @returns Distribution names and versions recorded in runtime.json.
+ */
+export function primaryRuntimePythonPackages(target: PrimaryRuntimeTarget, runtimeLock: typeof lock = lock): Record<string, string> {
+  const artifact = runtimeLock.targets[target]
+  return { ...runtimeLock.pythonPackages, ...('pythonPackages' in artifact ? artifact.pythonPackages : {}) }
+}
+
+/**
+ * Locate a locked wheel. An entry with `win7Shim` is a Windows 7 rebuild of the PyPI wheel at its URL: its native
+ * code imports Windows 8+ functions through the named shim DLL, which the rebuild carries (dsh-win7's
+ * scripts/build-win7-python-wheels.ps1). `DSH_WIN7_PYTHON_WHEELS` names the directory holding the rebuilds under
+ * their PyPI file names; each must match the locked digest, so the original wheel is never used in its place.
+ * @param wheel - Locked wheel record.
+ * @param cache - Download cache directory.
+ * @returns Verified local archive path.
+ */
+export async function primaryRuntimeWheelArchive(
+  wheel: { readonly url: string; readonly sha256: string; readonly win7Shim?: string }, cache: string,
+): Promise<string> {
+  if (wheel.win7Shim === undefined) return downloadPrimaryRuntimeAsset(wheel.url, wheel.sha256, cache)
+  const filename = basename(new URL(wheel.url).pathname)
+  const directory = process.env.DSH_WIN7_PYTHON_WHEELS
+  if (directory === undefined || directory === '') {
+    throw new Error(`primary runtime: ${filename} is a Windows 7 rebuild carrying ${wheel.win7Shim}; set DSH_WIN7_PYTHON_WHEELS to its directory`)
+  }
+  const local = resolve(directory, filename)
+  if (createHash('sha256').update(readFileSync(local)).digest('hex') !== wheel.sha256) throw new Error(`primary runtime: checksum mismatch for ${local}`)
+  return local
+}
+
+/**
  * Identify the inputs that assemble one target's payload, excluding unrelated target locks.
  * @param target - Runtime target whose archives are installed.
  * @param runtimeLock - Locked interpreter and wheel inputs.
@@ -266,11 +302,11 @@ export async function preparePrimaryRuntime(options: PreparePrimaryRuntimeOption
       payloadDigest: primaryRuntimePayloadDigest(target, lock, pnpmVersion),
       python: lock.pythonVersion,
       ...(pnpmVersion === undefined ? {} : { node: lock.nodeVersion, pnpm: pnpmVersion }),
-      pythonPackages: lock.pythonPackages,
+      pythonPackages: primaryRuntimePythonPackages(target),
     }
     const entries = workspaceDependencyPaths(output, manifest)
     for (const wheel of [...lock.targets[target].wheels, ...lock.wheels]) {
-      await unpackPrimaryRuntimeWheel(await downloadPrimaryRuntimeAsset(wheel.url, wheel.sha256, paths.downloads), entries.pythonPackages)
+      await unpackPrimaryRuntimeWheel(await primaryRuntimeWheelArchive(wheel, paths.downloads), entries.pythonPackages)
     }
     prunePrimaryRuntimePythonTests(entries.pythonPackages)
     writeFileSync(join(output, 'runtime.json'), `${JSON.stringify(manifest, undefined, 2)}\n`)

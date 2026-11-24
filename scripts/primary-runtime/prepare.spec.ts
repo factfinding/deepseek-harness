@@ -5,7 +5,10 @@ import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { zipSync } from 'fflate'
 import { expect, it } from 'vitest'
-import { downloadPrimaryRuntimeAsset, primaryRuntimePayloadDigest, prunePnpmForeignNativePackages, smokePrimaryRuntime, unpackPrimaryRuntimeWheel } from './prepare.ts'
+import {
+  downloadPrimaryRuntimeAsset, primaryRuntimePayloadDigest, primaryRuntimePythonPackages, primaryRuntimeWheelArchive,
+  prunePnpmForeignNativePackages, smokePrimaryRuntime, unpackPrimaryRuntimeWheel,
+} from './prepare.ts'
 import lock from './lock.json' with { type: 'json' }
 
 it('covers every SDK wheel target with the shared interpreter lock', () => {
@@ -17,13 +20,14 @@ const libraryWheel = Buffer.from('UEsDBAoAAAAAAASeLl0sYMPjDAAAAAwAAAAJAAAAc2FtcG
 const relocatedWheel = Buffer.from('UEsDBAoAAAAAAASeLl3x0Nj9FAAAABQAAAAeAAAAc2FtcGxlLTEuMC5kYXRhL3NjcmlwdHMvc2FtcGxlcmVxdWlyZXMgcmVsb2NhdGlvbgpQSwECHgMKAAAAAAAEni5d8dDY/RQAAAAUAAAAHgAAAAAAAAABAAAApIEAAAAAc2FtcGxlLTEuMC5kYXRhL3NjcmlwdHMvc2FtcGxlUEsFBgAAAAABAAEATAAAAFAAAAAAAA==', 'base64')
 const externalLibraryWheel = Buffer.from('UEsDBBQAAAAAAAAAIVyBOE8OHAAAABwAAAAhAAAAc2FtcGxlLTEuMC5kYXRhL3B1cmVsaWIvc2FtcGxlLnB5cmVxdWlyZXMgbGlicmFyeSByZWxvY2F0aW9uClBLAQIUAxQAAAAAAAAAIVyBOE8OHAAAABwAAAAhAAAAAAAAAAAAAACAAQAAAABzYW1wbGUtMS4wLmRhdGEvcHVyZWxpYi9zYW1wbGUucHlQSwUGAAAAAAEAAQBPAAAAWwAAAAAA', 'base64')
 
-it.each(Object.entries(lock.targets))('records every locked wheel distribution and version for %s', (_target, artifact) => {
+it.each(Object.entries(lock.targets))('records every locked wheel distribution and version for %s', (target, artifact) => {
   const normalize = (name: string): string => name.toLowerCase().replace(/[-_.]+/gu, '-')
   const distributions = [...artifact.wheels, ...lock.wheels].map(({ url }) => {
     const [name, version] = basename(new URL(url).pathname).split('-')
     return [normalize(name!), version] as const
   })
-  const declared = Object.entries(lock.pythonPackages).map(([name, version]) => [normalize(name), version] as const)
+  const declared = Object.entries(primaryRuntimePythonPackages(target as keyof typeof lock.targets))
+    .map(([name, version]) => [normalize(name), version] as const)
   expect(new Set(distributions.map(([name]) => name)).size).toBe(distributions.length)
   expect(new Set(declared.map(([name]) => name)).size).toBe(declared.length)
   expect(Object.fromEntries(distributions)).toEqual(Object.fromEntries(declared))
@@ -44,6 +48,39 @@ it('locks the Windows 7 Python build of the shared interpreter release', () => {
   changed.targets['win-x64'].pythonNupkg.sha256 = 'a'.repeat(64)
   expect(primaryRuntimePayloadDigest('win-x64', changed, '11.7.0')).not.toBe(primaryRuntimePayloadDigest('win-x64', lock, '11.7.0'))
   expect(primaryRuntimePayloadDigest('mac-arm64', changed, '11.7.0')).toBe(primaryRuntimePayloadDigest('mac-arm64', lock, '11.7.0'))
+})
+
+it('adds the Windows 7 PDF libraries to win-x64 alone', () => {
+  const windows = primaryRuntimePythonPackages('win-x64')
+  for (const name of ['pypdf', 'pdfplumber', 'pdfminer.six', 'pymupdf', 'cryptography', 'onnxruntime']) expect(windows).toHaveProperty([name])
+  // The PDF libraries must not move a bundled Office distribution; pip resolved them against these pins.
+  expect(windows).toMatchObject(lock.pythonPackages)
+  for (const target of ['mac-arm64', 'mac-x64', 'linux-x64', 'linux-arm64'] as const) expect(primaryRuntimePythonPackages(target)).toEqual(lock.pythonPackages)
+  const changed = structuredClone(lock)
+  changed.targets['win-x64'].pythonPackages.pypdf = '7.1.2'
+  expect(primaryRuntimePayloadDigest('win-x64', changed, '11.7.0')).not.toBe(primaryRuntimePayloadDigest('win-x64', lock, '11.7.0'))
+  expect(primaryRuntimePayloadDigest('mac-arm64', changed, '11.7.0')).toBe(primaryRuntimePayloadDigest('mac-arm64', lock, '11.7.0'))
+})
+
+it('locks the Windows 7 shim rebuilds by digest and takes them only from DSH_WIN7_PYTHON_WHEELS', async () => {
+  const shims = lock.targets['win-x64'].wheels.filter(wheel => 'win7Shim' in wheel)
+  expect(shims.map(wheel => [basename(new URL(wheel.url).pathname).split('-')[0], wheel.win7Shim]))
+    .toEqual([['pymupdf', 'dshmu.dll'], ['cryptography', 'dshw7.dll'], ['onnxruntime', 'dsho.dll']])
+  const root = await mkdtemp(join(tmpdir(), 'primary-win7-wheels-'))
+  const previous = process.env.DSH_WIN7_PYTHON_WHEELS
+  try {
+    const wheel = { url: 'https://unused.invalid/packages/sample-1.0-cp312-cp312-win_amd64.whl', sha256: createHash('sha256').update(libraryWheel).digest('hex'), win7Shim: 'dshw7.dll' }
+    await writeFile(join(root, 'sample-1.0-cp312-cp312-win_amd64.whl'), libraryWheel)
+    delete process.env.DSH_WIN7_PYTHON_WHEELS
+    await expect(primaryRuntimeWheelArchive(wheel, root)).rejects.toThrow('set DSH_WIN7_PYTHON_WHEELS')
+    process.env.DSH_WIN7_PYTHON_WHEELS = root
+    expect(await primaryRuntimeWheelArchive(wheel, join(root, 'cache'))).toBe(join(root, 'sample-1.0-cp312-cp312-win_amd64.whl'))
+    await expect(primaryRuntimeWheelArchive({ ...wheel, sha256: 'a'.repeat(64) }, join(root, 'cache'))).rejects.toThrow('checksum mismatch')
+  } finally {
+    if (previous === undefined) delete process.env.DSH_WIN7_PYTHON_WHEELS
+    else process.env.DSH_WIN7_PYTHON_WHEELS = previous
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 it('invalidates payload identity for shared wheels, package versions and package-manager changes', () => {
